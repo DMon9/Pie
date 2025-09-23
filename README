@@ -1,0 +1,15 @@
+# Pi Squared Backend
+
+This is the backend API for Pi Squared Sports.
+
+## Run locally
+```bash
+npm install
+npm start
+```
+
+## Deploy on Render
+- Create new Web Service
+- Build command: `npm install`
+- Start command: `npm start`
+- Render auto-detects Node.js from package.json
