@@ -1,16 +1,14 @@
 {
-  "name": "pisquared-backend",
+  "name": "pi-squared-backend",
   "version": "1.0.0",
-  "description": "Backend API for Pi Squared Sports",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "stripe": "^12.0.0",
     "cors": "^2.8.5",
-    "body-parser": "^1.20.2"
+    "body-parser": "^1.20.2",
+    "stripe": "^14.0.0"
   }
 }
-  
