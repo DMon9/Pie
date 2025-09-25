@@ -1,140 +1,66 @@
 const express = require("express");
-const fetch = require("node-fetch");
-const Stripe = require("stripe");
 const cors = require("cors");
-const bodyParser = require("body-parser");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-// 🏦 In-memory balances + withdrawal requests (replace with DB in production)
-let balances = {};
-let withdrawals = [];
-
-// ✅ Health check
-app.get("/", (req, res) => {
-  res.send("✅ Pi Squared Backend with Withdraw Requests is running");
+// Health check
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", message: "Pi2Sports backend running" });
 });
 
-// ✅ Get balance by wallet
-app.get("/api/balance/:wallet", (req, res) => {
-  const wallet = req.params.wallet || "guest";
-  res.json({ wallet, balance: balances[wallet] || 0 });
-});
-
-// ✅ Proxy NFL live scores
-app.get("/api/nfl", async (req, res) => {
+// Create Checkout Session (deposit)
+app.post("/api/deposit", async (req, res) => {
   try {
-    const r = await fetch("https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=American%20Football");
-    const data = await r.json();
-    if (!data.events) {
-      const upcoming = await fetch("https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4391");
-      const upData = await upcoming.json();
-      return res.json(upData);
-    }
-    res.json(data);
-  } catch (err) {
-    console.error("NFL fetch error:", err);
-    res.status(500).json({ error: "Failed to fetch NFL scores" });
-  }
-});
-
-// ✅ Dynamic Stripe checkout (deposits)
-app.post("/api/create-checkout-session", async (req, res) => {
-  try {
-    const { wallet, amount } = req.body;
-    if (!amount || amount < 100) {
-      return res.status(400).json({ error: "Invalid deposit amount" });
-    }
+    const { amount } = req.body;
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
+      mode: "payment",
       line_items: [
         {
           price_data: {
             currency: "usd",
             product_data: { name: "Deposit" },
-            unit_amount: amount,
+            unit_amount: Math.round(amount * 100),
           },
           quantity: 1,
         },
       ],
-      mode: "payment",
-      success_url: "https://pi2sports.netlify.app/success.html",
-      cancel_url: "https://pi2sports.netlify.app/cancel.html",
-      metadata: { wallet: wallet || "guest" }
+      success_url: `${process.env.FRONTEND_URL}/?success=true`,
+      cancel_url: `${process.env.FRONTEND_URL}/?canceled=true`,
     });
 
     res.json({ url: session.url });
   } catch (err) {
-    console.error("Stripe error:", err);
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: "Failed to create checkout session" });
   }
 });
 
-// ✅ Stripe webhook
-app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) => {
+// Webhook for Stripe events
+app.post("/webhook", express.raw({ type: "application/json" }), (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
   } catch (err) {
-    console.error("Webhook signature verification failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
   if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    const wallet = session.metadata.wallet || "guest";
-    const amount = session.amount_total;
-
-    if (!balances[wallet]) balances[wallet] = 0;
-    balances[wallet] += amount / 100; // cents → dollars
-
-    console.log(`💰 Credited ${wallet} with $${amount/100}`);
+    console.log("💰 Payment successful:", event.data.object.id);
   }
 
-  res.sendStatus(200);
+  res.json({ received: true });
 });
 
-// ✅ Withdrawal request endpoint
-app.post("/api/withdraw-request", (req, res) => {
-  const { wallet, amount, destination } = req.body;
-
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: "Invalid withdrawal amount" });
-  }
-
-  if (!balances[wallet] || balances[wallet] < amount) {
-    return res.status(400).json({ error: "Insufficient balance" });
-  }
-
-  balances[wallet] -= amount;
-
-  const request = {
-    id: withdrawals.length + 1,
-    wallet,
-    amount,
-    destination,
-    status: "pending",
-    created: new Date()
-  };
-  withdrawals.push(request);
-
-  console.log("💸 Withdrawal requested:", request);
-
-  res.json({ success: true, message: "Withdrawal request logged", request });
-});
-
-// ✅ Admin: get all withdrawal requests
-app.get("/api/withdraw-requests", (req, res) => {
-  res.json(withdrawals);
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
