@@ -11,12 +11,13 @@ app.use(express.json());
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-// 🏦 In-memory balances (replace with DB in production)
+// 🏦 In-memory balances + withdrawal requests (replace with DB in production)
 let balances = {};
+let withdrawals = [];
 
 // ✅ Health check
 app.get("/", (req, res) => {
-  res.send("✅ Pi Squared Backend is running with Stripe integration");
+  res.send("✅ Pi Squared Backend with Withdraw Requests is running");
 });
 
 // ✅ Get balance by wallet
@@ -42,7 +43,7 @@ app.get("/api/nfl", async (req, res) => {
   }
 });
 
-// ✅ Dynamic Stripe checkout
+// ✅ Dynamic Stripe checkout (deposits)
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { wallet, amount } = req.body;
@@ -97,10 +98,11 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
 
     console.log(`💰 Credited ${wallet} with $${amount/100}`);
   }
-// In-memory withdrawal requests
-let withdrawals = [];
 
-// ✅ Handle withdrawal requests
+  res.sendStatus(200);
+});
+
+// ✅ Withdrawal request endpoint
 app.post("/api/withdraw-request", (req, res) => {
   const { wallet, amount, destination } = req.body;
 
@@ -108,15 +110,12 @@ app.post("/api/withdraw-request", (req, res) => {
     return res.status(400).json({ error: "Invalid withdrawal amount" });
   }
 
-  // Check balance
   if (!balances[wallet] || balances[wallet] < amount) {
     return res.status(400).json({ error: "Insufficient balance" });
   }
 
-  // Deduct from balance
   balances[wallet] -= amount;
 
-  // Store request
   const request = {
     id: withdrawals.length + 1,
     wallet,
@@ -132,11 +131,9 @@ app.post("/api/withdraw-request", (req, res) => {
   res.json({ success: true, message: "Withdrawal request logged", request });
 });
 
-// ✅ Admin can fetch all withdrawal requests
+// ✅ Admin: get all withdrawal requests
 app.get("/api/withdraw-requests", (req, res) => {
   res.json(withdrawals);
-});
-  res.sendStatus(200);
 });
 
 const PORT = process.env.PORT || 3000;
