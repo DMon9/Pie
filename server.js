@@ -97,7 +97,45 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), (req, res) =>
 
     console.log(`💰 Credited ${wallet} with $${amount/100}`);
   }
+// In-memory withdrawal requests
+let withdrawals = [];
 
+// ✅ Handle withdrawal requests
+app.post("/api/withdraw-request", (req, res) => {
+  const { wallet, amount, destination } = req.body;
+
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: "Invalid withdrawal amount" });
+  }
+
+  // Check balance
+  if (!balances[wallet] || balances[wallet] < amount) {
+    return res.status(400).json({ error: "Insufficient balance" });
+  }
+
+  // Deduct from balance
+  balances[wallet] -= amount;
+
+  // Store request
+  const request = {
+    id: withdrawals.length + 1,
+    wallet,
+    amount,
+    destination,
+    status: "pending",
+    created: new Date()
+  };
+  withdrawals.push(request);
+
+  console.log("💸 Withdrawal requested:", request);
+
+  res.json({ success: true, message: "Withdrawal request logged", request });
+});
+
+// ✅ Admin can fetch all withdrawal requests
+app.get("/api/withdraw-requests", (req, res) => {
+  res.json(withdrawals);
+});
   res.sendStatus(200);
 });
 
