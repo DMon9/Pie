@@ -1,72 +1,58 @@
+// server.js
 const express = require("express");
-const fetch = require("node-fetch");
-const Stripe = require("stripe");
-const cors = require("cors");
-
 const app = express();
-app.use(cors());
-app.use(express.json());
+const bodyParser = require("body-parser");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // keep your key in Render env vars
 
-// Stripe setup (Render → Environment Variable → STRIPE_SECRET_KEY)
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+// Middleware for raw body (needed for Stripe signature verification)
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf.toString();
+    },
+  })
+);
 
-// ✅ Health check
 app.get("/", (req, res) => {
-  res.send("✅ Pi Squared Backend is running");
+  res.send("✅ Pi Squared Backend is running with Stripe support");
 });
 
-// ✅ Proxy NFL live scores
-app.get("/api/nfl", async (req, res) => {
+// Webhook endpoint
+app.post("/webhook", (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
+
   try {
-    const r = await fetch("https://www.thesportsdb.com/api/v1/json/3/livescore.php?s=American%20Football");
-    const data = await r.json();
-
-    // fallback: upcoming games if no live data
-    if (!data.events) {
-      const upcoming = await fetch("https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4391");
-      const upData = await upcoming.json();
-      return res.json(upData);
-    }
-
-    res.json(data);
+    event = stripe.webhooks.constructEvent(
+      req.rawBody,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET // copy from Stripe dashboard when you create webhook
+    );
   } catch (err) {
-    console.error("NFL fetch error:", err);
-    res.status(500).json({ error: "Failed to fetch NFL scores" });
+    console.error("❌ Webhook signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
+
+  // Handle the event
+  switch (event.type) {
+    case "payment_intent.succeeded":
+      const paymentIntent = event.data.object;
+      console.log(`💰 PaymentIntent succeeded: ${paymentIntent.id}`);
+      // TODO: Update user balance in database
+      break;
+
+    case "payment_intent.payment_failed":
+      const failedPayment = event.data.object;
+      console.log(`❌ Payment failed: ${failedPayment.id}`);
+      break;
+
+    default:
+      console.log(`Unhandled event type ${event.type}`);
+  }
+
+  res.json({ received: true });
 });
 
-// ✅ Dynamic Stripe checkout
-app.post("/api/create-checkout-session", async (req, res) => {
-  try {
-    const { amount } = req.body; // amount in cents from frontend
-
-    if (!amount || amount < 100) {
-      return res.status(400).json({ error: "Invalid deposit amount" });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: { name: "Deposit" },
-            unit_amount: amount,
-          },
-          quantity: 1,
-        },
-      ],
-      mode: "payment",
-      success_url: "https://pi2sports.netlify.app?success=true",
-      cancel_url: "https://pi2sports.netlify.app?cancelled=true",
-    });
-
-    res.json({ url: session.url });
-  } catch (err) {
-    console.error("Stripe error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
+// Port for Render
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
