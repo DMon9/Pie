@@ -1,6 +1,6 @@
 {
-  "name": "pi2sports-backend-auth",
-  "version": "1.1.0",
+  "name": "pi2sports-backend-contests",
+  "version": "1.2.1",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "dependencies": {
@@ -8,6 +8,7 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^2.7.0",
     "pg": "^8.11.3",
     "stripe": "^12.0.0"
   }
