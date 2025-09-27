@@ -1,15 +1,14 @@
 {
-  "name": "pi2sports-backend-contests",
-  "version": "1.2.1",
+  "name": "pi2sports-backend-fantasy",
+  "version": "1.5.0",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": { "start": "node server.js" },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "jsonwebtoken": "^9.0.2",
-    "node-fetch": "^2.7.0",
-    "pg": "^8.11.3",
-    "stripe": "^12.0.0"
+    "express": "^4.19.2",
+    "pg": "^8.11.5",
+    "body-parser": "^1.20.2",
+    "cookie-parser": "^1.4.6"
   }
 }
