@@ -1,20 +1,25 @@
-# Pi2Sports Backend (Auth + Stripe + Postgres)
+# Pi² Sports Backend — Auth + Stripe + Contests + Odds
 
-## Env Vars (Render → Settings → Environment)
-- DATABASE_URL: postgres://user:pass@host:5432/db (Render Postgres; SSL on)
-- STRIPE_SECRET_KEY: sk_live_... (or sk_test_...)
-- STRIPE_WEBHOOK_SECRET: whsec_...
-- FRONTEND_URL: https://pi2sports.netlify.app
-- JWT_SECRET: a-long-random-string
+## Env (Render → Settings → Environment)
+- DATABASE_URL=postgres://user:pass@host:5432/db
+- STRIPE_SECRET_KEY=sk_live_... (or sk_test_...)
+- STRIPE_WEBHOOK_SECRET=whsec_...
+- FRONTEND_URL=https://pi2sports.netlify.app
+- JWT_SECRET=<random-long-string>
+- ADMIN_EMAIL=<your admin email>
+- PLATFORM_RAKE_PCT=0.07
+- ODDS_API_KEY=<your odds api key>
 
-## Endpoints
-- POST /register {email,password}
-- POST /login {email,password} → {token}
-- GET /me/balance  (Authorization: Bearer <token>)
-- POST /api/create-checkout-session {amount}  (integer cents) (auth)
-- POST /me/withdraw-request {amount} (auth)
-- POST /webhook  (Stripe)
-
-## Notes
-- Tables auto-create on boot.
-- Webhook credits user's balance after successful deposit.
+## Routes
+- POST /register, POST /login
+- GET /me/balance (auth)
+- POST /api/create-checkout-session (auth) → {amount:cents}
+- POST /webhook (Stripe)
+- GET /contests
+- POST /contests/:id/enter (auth)
+- ADMIN (auth as ADMIN_EMAIL):
+  - POST /admin/contests
+  - PATCH /admin/contests/:id
+  - DELETE /admin/contests/:id
+  - POST /admin/contests/:id/settle { winners:[emails] }
+- GET /games/college-football (Odds API)
