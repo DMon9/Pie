@@ -1,25 +1,34 @@
-# Pi² Sports Backend — Auth + Stripe + Contests + Odds
 
-## Env (Render → Settings → Environment)
-- DATABASE_URL=postgres://user:pass@host:5432/db
-- STRIPE_SECRET_KEY=sk_live_... (or sk_test_...)
-- STRIPE_WEBHOOK_SECRET=whsec_...
-- FRONTEND_URL=https://pi2sports.netlify.app
-- JWT_SECRET=<random-long-string>
-- ADMIN_EMAIL=<your admin email>
-- PLATFORM_RAKE_PCT=0.07
-- ODDS_API_KEY=<your odds api key>
+# Pi² Sports Backend (Full Scaffold)
+- Email/password + Google OAuth (redirects back to FRONTEND_URL with JWT).
+- Stripe webhook validates referrals on any $10+ deposit.
+- Referrals API (validated, pending) + global leaderboard.
+- Milestones: 100=$20, 500=$100, 1000=$1000 (first only) — **admin approval required**.
+- Image proxy endpoints (ESPN fallback) for team logos & player headshots.
+- **In-memory store** for easy testing — replace with a real DB when ready.
 
-## Routes
-- POST /register, POST /login
-- GET /me/balance (auth)
-- POST /api/create-checkout-session (auth) → {amount:cents}
-- POST /webhook (Stripe)
-- GET /contests
-- POST /contests/:id/enter (auth)
-- ADMIN (auth as ADMIN_EMAIL):
-  - POST /admin/contests
-  - PATCH /admin/contests/:id
-  - DELETE /admin/contests/:id
-  - POST /admin/contests/:id/settle { winners:[emails] }
-- GET /games/college-football (Odds API)
+## ENV (Render)
+```
+FRONTEND_URL=https://pi2sports.netlify.app
+JWT_SECRET=change-me
+ADMIN_TOKEN=change-me-admin
+
+STRIPE_SECRET_KEY=sk_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_CALLBACK_URL=https://<your-render-service>/auth/google/callback
+
+IMAGE_PROVIDER_PRIMARY=sportradar
+IMAGE_PROVIDER_FALLBACK=espn
+IMAGE_PLACEHOLDER_TEAM=/assets/default-team.svg
+IMAGE_PLACEHOLDER_PLAYER=/assets/default-player.svg
+PORT=3000
+```
+
+## Start
+```
+npm install
+npm start
+```

@@ -1,276 +1,308 @@
 
 /**
- * UBet Backend ADMIN build
- * - Adds Admin API with token auth for CRUD contests & markets
- * - Adds props picker stubs + search (returns sample data w/o provider key)
- * - Keeps all PLUS features (stripe, usdc, odds, picks)
+ * Pi² Sports Backend (Full Scaffold)
+ * - Email/password + Google OAuth login
+ * - JWT auth
+ * - Stripe webhook validates referrals after any $10+ deposit
+ * - Referrals API (validated/pending + leaderboard)
+ * - Milestones with admin approval (100=$20, 500=$100, 1000=$1000 first only)
+ * - Image proxy endpoints (ESPN fallback) for team logos & player headshots
+ * - In-memory data store (replace with DB when ready)
  */
-const express=require('express');
-const cors=require('cors');
-const cookieParser=require('cookie-parser');
-const bodyParser=require('body-parser');
-const {Pool}=require('pg');
-const Stripe=require('stripe');
-const fetch=require('node-fetch');
-const {ethers}=require('ethers');
-const cron=require('node-cron');
-const app=express();
+const express = require('express');
+const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
+const fetch = require('node-fetch');
+const Stripe = require('stripe');
+const bodyParser = require('body-parser');
 
-app.post('/webhook', express.raw({type:'application/json'}), webhookHandler);
+const app = express();
 
-app.use(cors({origin:true, credentials:true}));
+// Stripe needs the raw body for webhook verification
+app.use((req, res, next) => {
+  if (req.originalUrl === '/webhook') {
+    bodyParser.raw({ type: 'application/json' })(req, res, next);
+  } else {
+    bodyParser.json({ limit: '1mb' })(req, res, next);
+  }
+});
+
+app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
-app.use(bodyParser.json());
 
-const PORT=process.env.PORT||3000;
-const FRONTEND_URL=(process.env.FRONTEND_URL||'').replace(/\/$/,'');
-const ADMIN_EMAIL=(process.env.ADMIN_EMAIL||'').toLowerCase();
-const ADMIN_TOKEN=process.env.ADMIN_TOKEN||'';
-const PLATFORM_RAKE_PCT=Number(process.env.PLATFORM_RAKE_PCT||'0.07');
-const DATABASE_URL=process.env.DATABASE_URL;
+// ---------- ENV ----------
+const PORT = process.env.PORT || 3000;
+const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:8888').replace(/\/$/,''); // e.g., https://pi2sports.netlify.app
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-me-admin';
+
+// Google OAuth
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_CALLBACK_URL = process.env.GOOGLE_CALLBACK_URL || `${FRONTEND_URL}/auth/callback`;
 
 // Stripe
-const stripe=process.env.STRIPE_SECRET_KEY?Stripe(process.env.STRIPE_SECRET_KEY):null;
-const STRIPE_ENDPOINT_SECRET=process.env.STRIPE_WEBHOOK_SECRET||'';
+const stripe = (process.env.STRIPE_SECRET_KEY)? Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 
-// Odds API
-const ODDS_API_KEY=process.env.ODDS_API_KEY||'';
-// Props provider (placeholder)
-const SPORTRADAR_API_KEY=process.env.SPORTRADAR_API_KEY||'';
+// Images proxy config
+const IMAGE_PROVIDER_PRIMARY=(process.env.IMAGE_PROVIDER_PRIMARY||'sportradar').toLowerCase();
+const IMAGE_PROVIDER_FALLBACK=(process.env.IMAGE_PROVIDER_FALLBACK||'espn').toLowerCase();
+const PH_TEAM=(process.env.IMAGE_PLACEHOLDER_TEAM||'/assets/default-team.svg');
+const PH_PLAYER=(process.env.IMAGE_PLACEHOLDER_PLAYER||'/assets/default-player.svg');
 
-// Chains
-const CHAINS = {
-  ethereum: { chainId:1, rpc:process.env.ETHEREUM_RPC_URL||'', usdc: process.env.USDC_ETH||'0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
-  polygon: { chainId:137, rpc:process.env.POLYGON_RPC_URL||'', usdc: process.env.USDC_POLY||'0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174' },
-  arbitrum:{ chainId:42161, rpc:process.env.ARBITRUM_RPC_URL||'', usdc: process.env.USDC_ARB||'0xaf88d065e77c8cC2239327C5EDb3A432268e5831' }
+// In-memory stores (replace with DB)
+const mem = {
+  users: {},           // id -> { id, email, display_name, cashBalance, contestCredits, referralsCount, provider, passwordHash? }
+  referrals: [],       // { inviter_user_id, referred_user_id, qualified:false, invited_at, qualified_at, first_deposit_cents }
+  milestones: [],      // { id, user_id, tier:100|500|1000, amount_cents, status:'pending'|'approved'|'denied', created_at, decided_at }
+  sessions: {},        // token -> user_id
 };
-const ADMIN_PRIVATE_KEY=process.env.ADMIN_PRIVATE_KEY||'';
 
-const providers={}, signers={}, usdcs={}, houses={};
-const erc20Abi=[
-  'function decimals() view returns (uint8)',
-  'function balanceOf(address owner) view returns (uint256)',
-  'function transfer(address to, uint256 value) returns (bool)',
-  'event Transfer(address indexed from, address indexed to, uint256 value)'
-];
-const {ethers: ethersNS}=require('ethers');
-for(const k of Object.keys(CHAINS)){
-  const cfg=CHAINS[k];
-  if(cfg.rpc && ADMIN_PRIVATE_KEY){
-    providers[k]=new ethersNS.providers.JsonRpcProvider(cfg.rpc);
-    signers[k]=new ethersNS.Wallet(ADMIN_PRIVATE_KEY, providers[k]);
-    houses[k]=signers[k].address;
-    usdcs[k]=new ethersNS.Contract(cfg.usdc, erc20Abi, signers[k]);
-  }
+function uid(prefix='u'){ return prefix+'_'+Math.random().toString(36).slice(2,10); }
+function now(){ return new Date().toISOString(); }
+
+// JWT helpers
+function signToken(user){
+  return jwt.sign({ uid:user.id, email:user.email }, JWT_SECRET, { expiresIn:'7d' });
 }
-
-const pool=new Pool({connectionString:DATABASE_URL, ssl: DATABASE_URL?.includes('render.com')?{rejectUnauthorized:false}:false});
-
-const payoutMatrix={2:{standard:4,flex1:null,flex2:null},3:{standard:8,flex1:2,flex2:null},4:{standard:15,flex1:5,flex2:1.2},5:{standard:30,flex1:10,flex2:3},6:{standard:60,flex1:20,flex2:5},7:{standard:100,flex1:35,flex2:10}};
-
-async function migrate(){
-  await pool.query('CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY,email TEXT UNIQUE,balance NUMERIC DEFAULT 0,eth_address TEXT,created_at TIMESTAMP DEFAULT NOW())');
-  await pool.query('CREATE TABLE IF NOT EXISTS transactions(id SERIAL PRIMARY KEY,user_id INTEGER,amount NUMERIC,type TEXT,status TEXT,meta JSONB,created_at TIMESTAMP DEFAULT NOW())');
-  await pool.query(`CREATE TABLE IF NOT EXISTS contests(
-    id SERIAL PRIMARY KEY,title TEXT,sport TEXT,entry_fee NUMERIC,status TEXT DEFAULT 'open',
-    created_by INTEGER,created_at TIMESTAMP DEFAULT NOW(),game_id TEXT,market TEXT,selection TEXT,odds NUMERIC,
-    max_entries INTEGER, rake_pct NUMERIC, prize_split JSONB)`);
-  await pool.query('CREATE TABLE IF NOT EXISTS contest_entries(id SERIAL PRIMARY KEY,contest_id INTEGER,user_id INTEGER,created_at TIMESTAMP DEFAULT NOW(), UNIQUE(contest_id,user_id))');
-  await pool.query('CREATE TABLE IF NOT EXISTS platform_revenue(id SERIAL PRIMARY KEY,source TEXT,source_id TEXT,amount NUMERIC,created_at TIMESTAMP DEFAULT NOW())');
-  await pool.query('CREATE TABLE IF NOT EXISTS pick_entries(id SERIAL PRIMARY KEY,user_id INTEGER,stake NUMERIC,total_picks INTEGER,flex BOOLEAN DEFAULT false,status TEXT DEFAULT \'open\',payout NUMERIC,created_at TIMESTAMP DEFAULT NOW())');
-  await pool.query('CREATE TABLE IF NOT EXISTS pick_selections(id SERIAL PRIMARY KEY,entry_id INTEGER,label TEXT,side TEXT,line NUMERIC,sport TEXT,game_id TEXT,correct BOOLEAN,prop_ref TEXT)');
-  await pool.query('CREATE TABLE IF NOT EXISTS crypto_transfers(id SERIAL PRIMARY KEY,user_id INTEGER,chain TEXT,tx_hash TEXT,direction TEXT,amount NUMERIC,token TEXT DEFAULT \'USDC\',status TEXT,created_at TIMESTAMP DEFAULT NOW())');
-}
-migrate().catch(console.error);
-
-async function meUser(req){ const email=String(req.cookies?.email||'').toLowerCase(); if(!email) return null; const q=await pool.query('SELECT * FROM users WHERE email=$1',[email]); return q.rows[0]||null; }
-async function auth(req,res,next){ const u=await meUser(req); if(!u) return res.status(401).json({error:'login'}); req.user=u; next(); }
-function adminAuth(req,res,next){
-  const token = (req.headers.authorization||'').replace('Bearer ','').trim();
-  if(!ADMIN_TOKEN || token!==ADMIN_TOKEN) return res.status(401).json({error:'adminUnauthorized'});
-  next();
-}
-
-// base
-app.get('/',(req,res)=>res.send('UBet Backend ADMIN ready'));
-app.get('/config',(req,res)=>res.json({houses, rakePct: PLATFORM_RAKE_PCT, payoutMatrix, chains: Object.keys(CHAINS)}));
-app.get('/picks/matrix',(req,res)=>res.json(payoutMatrix));
-
-// login & me
-app.post('/login-dev', async (req,res)=>{
-  const email=String(req.body?.email||'').toLowerCase();
-  if(!email) return res.status(400).json({error:'email'});
-  let q=await pool.query('SELECT * FROM users WHERE email=$1',[email]);
-  if(!q.rows.length){ q=await pool.query('INSERT INTO users(email,balance) VALUES($1,0) RETURNING *',[email]); }
-  res.cookie('email',email,{httpOnly:false,sameSite:'lax'});
-  res.json({ok:true});
-});
-app.get('/me', auth, async (req,res)=>{
-  res.json({email:req.user.email,balance:Number(req.user.balance||0),eth_address:req.user.eth_address||null,houses});
-});
-
-// Stripe
-app.post('/api/create-checkout-session', auth, async (req,res)=>{
+function auth(req,res,next){
+  const authz = req.headers.authorization || '';
+  const tok = authz.startsWith('Bearer ') ? authz.slice(7) : (req.cookies.token || '');
+  if(!tok) return res.status(401).send('Unauthorized');
   try{
-    if(!stripe) return res.status(500).json({error:'Stripe not configured'});
-    const amt=Number(req.body?.amount||0);
-    const cents=Math.round(amt*100);
-    const session=await stripe.checkout.sessions.create({
-      mode:'payment',
-      payment_method_types:['card'],
-      line_items:[{price_data:{currency:'usd',product_data:{name:'UBet Deposit'},unit_amount:cents},quantity:1}],
-      success_url:FRONTEND_URL?`${FRONTEND_URL}/success.html`:'https://example.com/success',
-      cancel_url:FRONTEND_URL?`${FRONTEND_URL}/cancel.html`:'https://example.com/cancel',
-      metadata:{user_email:req.user.email}
+    const payload = jwt.verify(tok, JWT_SECRET);
+    req.user = payload;
+    next();
+  }catch(e){ return res.status(401).send('Invalid token'); }
+}
+function admin(req,res,next){
+  const authz = req.headers.authorization || '';
+  const tok = authz.startsWith('Bearer ') ? authz.slice(7) : '';
+  if(tok===ADMIN_TOKEN) return next();
+  return res.status(401).send('Admin token required');
+}
+
+// ---------- Auth (email/password minimal stubs) ----------
+app.post('/auth/register', (req,res)=>{
+  const { email, password, display_name, ref } = req.body||{};
+  if(!email || !password) return res.status(400).send('Email and password required');
+  const exists = Object.values(mem.users).find(u=>u.email===email);
+  if(exists) return res.status(400).send('Email already registered');
+  const u = { id: uid(), email, display_name: display_name||email.split('@')[0], cashBalance:0, contestCredits:0, referralsCount:0, provider:'password' };
+  mem.users[u.id]=u;
+  // record pending referral if ref provided (simple: treat ref as inviter email or id)
+  if(ref){
+    const inviter = Object.values(mem.users).find(x=>x.id===ref || x.email===ref);
+    if(inviter){
+      mem.referrals.push({ inviter_user_id: inviter.id, referred_user_id: u.id, qualified:false, invited_at: now(), qualified_at:null, first_deposit_cents:0 });
+    }
+  }
+  const token = signToken(u);
+  mem.sessions[token]=u.id;
+  res.json({ token, user:{ id:u.id, email:u.email, display_name:u.display_name } });
+});
+
+app.post('/auth/login', (req,res)=>{
+  const { email, password } = req.body||{};
+  const u = Object.values(mem.users).find(x=>x.email===email);
+  if(!u) return res.status(401).send('Invalid credentials');
+  const token = signToken(u);
+  mem.sessions[token]=u.id;
+  res.json({ token, user:{ id:u.id, email:u.email, display_name:u.display_name } });
+});
+
+// ---------- Google OAuth ----------
+app.get('/auth/google', (req,res)=>{
+  if(!GOOGLE_CLIENT_ID || !GOOGLE_CALLBACK_URL) return res.status(400).send('Google OAuth not configured');
+  const state = 'pi2-'+Math.random().toString(36).slice(2);
+  const scope = encodeURIComponent('openid email profile');
+  const redirect = encodeURIComponent(GOOGLE_CALLBACK_URL);
+  const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${GOOGLE_CLIENT_ID}&redirect_uri=${redirect}&response_type=code&scope=${scope}&state=${state}&prompt=select_account`;
+  res.redirect(url);
+});
+
+app.get('/auth/google/callback', async (req,res)=>{
+  const { code } = req.query;
+  if(!code) return res.status(400).send('Missing code');
+  try{
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method:'POST',
+      headers:{ 'content-type':'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: GOOGLE_CALLBACK_URL, grant_type: 'authorization_code'
+      })
     });
-    res.json({url:session.url});
-  }catch(e){ console.error(e); res.status(500).json({error:'stripe failed'}); }
-});
-async function webhookHandler(req,res){
-  if(!stripe) return res.json({received:true});
-  let event; try{
-    event= STRIPE_ENDPOINT_SECRET? Stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], STRIPE_ENDPOINT_SECRET): JSON.parse(req.body);
-  }catch(e){ return res.status(400).send('bad sig'); }
-  if(event.type==='checkout.session.completed'){
-    const s=event.data.object; const email=String(s.metadata?.user_email||'').toLowerCase(); const amount=(s.amount_total||0)/100;
-    if(email && amount>0){
-      await pool.query('UPDATE users SET balance=balance+$1 WHERE email=$2',[amount,email]);
-      const u=await pool.query('SELECT id FROM users WHERE email=$1',[email]);
-      await pool.query('INSERT INTO transactions(user_id,amount,type,status,meta) VALUES($1,$2,\'deposit\',\'completed\',$3)',[u.rows[0]?.id||null,amount,{session:s.id}]);
+    const tokenJson = await tokenRes.json();
+    const infoRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers:{ authorization: `Bearer ${tokenJson.access_token}` }
+    });
+    const info = await infoRes.json();
+    const email = info.email;
+    let u = Object.values(mem.users).find(x=>x.email===email);
+    if(!u){
+      u = { id: uid(), email, display_name: info.name || email.split('@')[0], cashBalance:0, contestCredits:0, referralsCount:0, provider:'google' };
+      mem.users[u.id]=u;
     }
+    const token = signToken(u);
+    mem.sessions[token]=u.id;
+    return res.redirect(`${FRONTEND_URL}/auth/callback?token=${encodeURIComponent(token)}`);
+  }catch(e){
+    return res.status(500).send('Google auth failed');
   }
-  res.json({received:true});
-}
-
-// Crypto
-const {utils}=require('ethers');
-app.post('/crypto/link-wallet', auth, async (req,res)=>{
-  const addr=String(req.body?.address||''); 
-  try{ if(!utils.isAddress(addr)) return res.status(400).json({error:'bad address'}); }catch{ return res.status(400).json({error:'bad address'}); }
-  await pool.query('UPDATE users SET eth_address=$1 WHERE id=$2',[addr,req.user.id]);
-  res.json({linked:true,address:addr,houses});
-});
-app.get('/crypto/deposit-info', auth, (req,res)=>{
-  const chain=(req.query.chain||'ethereum').toLowerCase();
-  const house=houses[chain];
-  if(!house) return res.status(400).json({error:'chain not configured'});
-  res.json({token:'USDC',house,decimals:6,chain});
-});
-app.post('/crypto/withdraw', auth, async (req,res)=>{
-  try{
-    const chain=(req.body?.chain||'ethereum').toLowerCase();
-    const usdc=usdcs[chain], signer=signers[chain];
-    if(!usdc||!signer) return res.status(500).json({error:'crypto not configured for chain'});
-    const amount=Number(req.body?.amount||0);
-    const to=req.body?.to||req.user.eth_address;
-    if(!(amount>0) || !utils.isAddress(to)) return res.status(400).json({error:'amount/address'});
-    const qb=await pool.query('SELECT balance FROM users WHERE id=$1',[req.user.id]);
-    const bal=Number(qb.rows[0]?.balance||0);
-    if(bal<amount) return res.status(400).json({error:'insufficient'});
-    const value = Math.round(amount*1e6);
-    const tx = await usdc.transfer(to, value);
-    await pool.query('UPDATE users SET balance=balance-$1 WHERE id=$2',[amount, req.user.id]);
-    await pool.query('INSERT INTO crypto_transfers(user_id,chain,tx_hash,direction,amount,status) VALUES($1,$2,$3,\'withdraw\',$4,\'pending\')',[req.user.id,chain,tx.hash,amount]);
-    res.json({txHash: tx.hash, chain});
-  }catch(e){ console.error(e); res.status(500).json({error:'withdraw failed'}); }
 });
 
-// Odds API
-function sportKey(nfl){return nfl?'americanfootball_nfl':'americanfootball_ncaaf';}
-async function fetchOddsList(nfl){
-  const url=`https://api.the-odds-api.com/v4/sports/${sportKey(nfl)}/odds/?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,totals&oddsFormat=american`;
-  const r=await fetch(url); return r.json();
-}
-async function fetchScores(nfl){
-  const url=`https://api.the-odds-api.com/v4/sports/${sportKey(nfl)}/scores/?apiKey=${ODDS_API_KEY}&daysFrom=3`;
-  const r=await fetch(url); return r.json();
-}
-app.get('/games/:league', async (req,res)=>{
-  try{ const nfl=req.params.league.toLowerCase()==='nfl'; const data=await fetchOddsList(nfl); const out=(Array.isArray(data)?data:[]).map(g=>({id:g.id,commence_time:g.commence_time,home_team:g.home_team,away_team:g.away_team})); res.json(out);}catch(e){res.status(500).json({error:'fetch failed'});}
-});
-app.get('/games/:id/odds', async (req,res)=>{
-  try{ const nfl=String(req.query.nfl||'1')==='1'; const data=await fetchOddsList(nfl); const game=(Array.isArray(data)?data:[]).find(g=>g.id===req.params.id); if(!game) return res.status(404).json({error:'not found'}); const b=game.bookmakers&&game.bookmakers[0]; const markets={moneyline:[], total:[]}; if(b&&Array.isArray(b.markets)){ for(const m of b.markets){ if(m.key==='h2h')(m.outcomes||[]).forEach(o=>markets.moneyline.push({name:o.name,price:o.price})); if(m.key==='totals')(m.outcomes||[]).forEach(o=>markets.total.push({name:o.name,point:o.point,price:o.price})); } } res.json({id:game.id,home:game.home_team,away:game.away_team,markets}); }catch(e){ res.status(500).json({error:'odds failed'}); }
+// ---------- Me / Balance ----------
+app.get('/me', auth, (req,res)=>{
+  const u = mem.users[req.user.uid];
+  if(!u) return res.status(401).send('Unknown user');
+  res.json({ id:u.id, email:u.email, display_name:u.display_name, balance:u.cashBalance, credits:u.contestCredits });
 });
 
-// Picks
-app.post('/picks/entries', auth, async (req,res)=>{
-  try{
-    const picks=req.body?.picks||[]; const stake=Number(req.body?.stake||0); const flex=!!req.body?.flex;
-    if(!Array.isArray(picks) || picks.length<2 || picks.length>7) return res.status(400).json({error:'2-7 picks'});
-    if(!(stake>0)) return res.status(400).json({error:'stake'});
-    const u=await pool.query('SELECT balance FROM users WHERE id=$1',[req.user.id]); const bal=Number(u.rows[0]?.balance||0); if(bal<stake) return res.status(400).json({error:'insufficient'});
-    await pool.query('UPDATE users SET balance=balance-$1 WHERE id=$2',[stake, req.user.id]);
-    const ent=await pool.query('INSERT INTO pick_entries(user_id,stake,total_picks,flex,status) VALUES($1,$2,$3,$4,\'open\') RETURNING *',[req.user.id, stake, picks.length, flex]);
-    for(const p of picks){
-      await pool.query('INSERT INTO pick_selections(entry_id,label,side,line,sport,game_id,prop_ref) VALUES($1,$2,$3,$4,$5,$6,$7)',
-        [ent.rows[0].id, p.label, p.side, p.line, p.sport||'nfl', p.game_id||null, p.prop_ref||null]);
+// ---------- Stripe Webhook ----------
+if(stripe){
+  app.post('/webhook', (req,res)=>{
+    let event;
+    try{
+      const sig = req.headers['stripe-signature'];
+      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+    }catch(err){
+      return res.status(400).send(`Webhook Error: ${err.message}`);
     }
-    res.json({id:ent.rows[0].id});
-  }catch(e){ console.error(e); res.status(500).json({error:'failed'}); }
-});
-
-// Admin CRUD
-app.get('/admin/contests', adminAuth, async (req,res)=>{
-  const q=await pool.query('SELECT * FROM contests ORDER BY id DESC'); res.json(q.rows);
-});
-app.post('/admin/contests', adminAuth, async (req,res)=>{
-  const c=req.body||{};
-  const ins=await pool.query(`INSERT INTO contests(title,sport,entry_fee,status,game_id,market,selection,odds,max_entries,rake_pct,prize_split,created_by)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-    [c.title,c.sport,c.entry_fee,c.status||'open',c.game_id||null,c.market||null,c.selection||null,c.odds||null,c.max_entries||null,c.rake_pct||PLATFORM_RAKE_PCT,c.prize_split||{type:'winner-take-all'},0]);
-  res.json(ins.rows[0]);
-});
-app.patch('/admin/contests/:id', adminAuth, async (req,res)=>{
-  const id=req.params.id; const c=req.body||{};
-  const up=await pool.query(`UPDATE contests SET title=COALESCE($1,title), sport=COALESCE($2,sport), entry_fee=COALESCE($3,entry_fee),
-    status=COALESCE($4,status), game_id=COALESCE($5,game_id), market=COALESCE($6,market), selection=COALESCE($7,selection),
-    odds=COALESCE($8,odds), max_entries=COALESCE($9,max_entries), rake_pct=COALESCE($10,rake_pct), prize_split=COALESCE($11,prize_split) WHERE id=$12 RETURNING *`,
-    [c.title,c.sport,c.entry_fee,c.status,c.game_id,c.market,c.selection,c.odds,c.max_entries,c.rake_pct,c.prize_split,id]);
-  res.json(up.rows[0]);
-});
-app.delete('/admin/contests/:id', adminAuth, async (req,res)=>{
-  await pool.query('DELETE FROM contests WHERE id=$1',[req.params.id]); res.json({ok:true});
-});
-
-// Props sample/search
-const SAMPLE_PROPS=[
-  {id:'p1', player:'Patrick Mahomes', team:'KC', market:'Pass Yds', line:285.5, opp:'BUF', sport:'nfl'},
-  {id:'p2', player:'Travis Kelce', team:'KC', market:'Rec Yds', line:74.5, opp:'BUF', sport:'nfl'},
-  {id:'p3', player:'Caleb Williams', team:'USC', market:'Pass TDs', line:2.5, opp:'UCLA', sport:'cfb'}
-];
-app.get('/props/:league/search', async (req,res)=>{
-  const q=(req.query.q||'').toLowerCase();
-  const lg=req.params.league.toLowerCase();
-  const out=SAMPLE_PROPS.filter(p=>p.sport===lg && (!q || p.player.toLowerCase().includes(q)));
-  res.json(out);
-});
-
-// Cron scan + settle (same as PLUS, minimized)
-async function scanChain(chain){
-  try{
-    const usdc=usdcs[chain], provider=providers[chain], house=houses[chain];
-    if(!usdc||!provider||!house) return;
-    const latest=await provider.getBlockNumber();
-    const fromBlock=Math.max(0, latest-2500);
-    const filter=usdc.filters.Transfer(null, house);
-    const logs=await usdc.queryFilter(filter, fromBlock, latest);
-    for(const log of logs){
-      const from=log.args[0]; const value=Number(log.args[2].toString())/1e6;
-      const ex=await pool.query('SELECT 1 FROM crypto_transfers WHERE tx_hash=$1',[log.transactionHash]);
-      if(ex.rows.length) continue;
-      const u=await pool.query('SELECT id FROM users WHERE LOWER(eth_address)=LOWER($1)',[from]);
-      const uid=u.rows[0]?.id;
-      await pool.query('INSERT INTO crypto_transfers(user_id,chain,tx_hash,direction,amount,status) VALUES($1,$2,$3,\'deposit\',$4,$5)',
-        [uid||null,chain,log.transactionHash,value, uid?'completed':'unmatched']);
-      if(uid){
-        await pool.query('UPDATE users SET balance=balance+$1 WHERE id=$2',[value, uid]);
-        await pool.query('INSERT INTO transactions(user_id,amount,type,status,meta) VALUES($1,$2,\'deposit-usdc\',\'completed\',$3)',
-          [uid,value,{tx:log.transactionHash,chain}]);
+    if(event.type==='checkout.session.completed'){
+      const session = event.data.object;
+      const userEmail = session.customer_details && session.customer_details.email;
+      const amount_cents = session.amount_total || 0;
+      const user = Object.values(mem.users).find(x=>x.email===userEmail);
+      if(user){
+        // credit balance
+        user.cashBalance += amount_cents/100;
+        // Referral validation: any deposit >= $10 qualifies referral
+        if(amount_cents >= 1000){
+          const ref = mem.referrals.find(r=>r.referred_user_id===user.id && !r.qualified);
+          if(ref){
+            ref.qualified = true;
+            ref.qualified_at = now();
+            ref.first_deposit_cents = amount_cents;
+            // inviter reward
+            const inviter = mem.users[ref.inviter_user_id];
+            if(inviter){
+              inviter.contestCredits += 5;
+              inviter.referralsCount += 1;
+              // milestones
+              const tiers = [
+                {count:100, cents:2000},
+                {count:500, cents:10000},
+                {count:1000, cents:100000} // first user only
+              ];
+              tiers.forEach(t=>{
+                const exists = mem.milestones.find(m=>m.user_id===inviter.id && m.tier===t.count);
+                if(!exists && inviter.referralsCount>=t.count){
+                  if(t.count===1000){
+                    const alreadyWon = mem.milestones.find(m=>m.tier===1000 && m.status==='approved');
+                    if(alreadyWon) return;
+                  }
+                  mem.milestones.push({ id: uid('m'), user_id: inviter.id, tier:t.count, amount_cents:t.cents, status:'pending', created_at: now(), decided_at:null });
+                }
+              });
+            }
+          }
+        }
       }
     }
-  }catch(e){ console.error('scanChain', chain, e.message); }
+    res.json({ received: true });
+  });
+} else {
+  app.post('/webhook', (req,res)=>res.status(501).send('Stripe not configured'));
 }
-async function scanDeposits(){ for(const c of Object.keys(CHAINS)) await scanChain(c); }
-cron.schedule('*/1 * * * *', scanDeposits);
 
-app.listen(PORT, ()=>console.log('Backend ADMIN up on',PORT));
+// ---------- Referrals API ----------
+app.get('/account/referrals', auth, (req,res)=>{
+  const uid = req.user.uid;
+  const mine = mem.referrals.filter(r=>r.inviter_user_id===uid);
+  const validated = mine.filter(r=>r.qualified).map(r=>{
+    const u = mem.users[r.referred_user_id];
+    return { user_id: u.id, email: u.email, display_name: u.display_name, first_deposit: r.first_deposit_cents, qualified_at: r.qualified_at };
+  });
+  const pending = mine.filter(r=>!r.qualified).map(r=>{
+    const u = mem.users[r.referred_user_id];
+    return { user_id: u.id, email: u.email, display_name: u.display_name, invited_at: r.invited_at };
+  });
+  res.json({
+    validated, pending,
+    stats:{ validated_count: validated.length, pending_count: pending.length, credits_earned: (mem.users[uid]?.contestCredits||0) }
+  });
+});
+
+// Leaderboard (global top inviters)
+app.get('/referrals/leaderboard', (req,res)=>{
+  const list = Object.values(mem.users)
+    .sort((a,b)=>b.referralsCount - a.referralsCount)
+    .slice(0,20)
+    .map(u=>({ user: u.display_name||u.email, referrals: u.referralsCount, credits: u.contestCredits }));
+  res.json(list);
+});
+
+// Admin milestones review
+app.get('/admin/milestones', admin, (req,res)=>{
+  const { status } = req.query;
+  let list = mem.milestones;
+  if(status) list = list.filter(m=>m.status===status);
+  res.json(list);
+});
+app.post('/admin/milestones/:id/approve', admin, (req,res)=>{
+  const m = mem.milestones.find(x=>x.id===req.params.id);
+  if(!m || m.status!=='pending') return res.status(400).send('Invalid milestone');
+  const u = mem.users[m.user_id]; if(!u) return res.status(400).send('User missing');
+  u.cashBalance += m.amount_cents/100;
+  m.status='approved'; m.decided_at=now();
+  return res.json({ ok:true, milestone:m, user:{ id:u.id, cashBalance:u.cashBalance }});
+});
+app.post('/admin/milestones/:id/deny', admin, (req,res)=>{
+  const m = mem.milestones.find(x=>x.id===req.params.id);
+  if(!m || m.status!=='pending') return res.status(400).send('Invalid milestone');
+  m.status='denied'; m.decided_at=now();
+  return res.json({ ok:true, milestone:m });
+});
+
+// ---------- Images proxy (ESPN fallback) ----------
+function espnTeamURL(abbr, league){
+  const lg=(league||'nfl').toLowerCase();
+  if(!abbr) return null;
+  if(lg==='nfl') return `https://a.espncdn.com/i/teamlogos/nfl/500/${abbr}.png`;
+  return `https://a.espncdn.com/i/teamlogos/ncaa/500/${abbr}.png`;
+}
+function espnPlayerURL(espnId, league){
+  const lg=(league||'nfl').toLowerCase();
+  if(!espnId) return null;
+  if(lg==='nfl') return `https://a.espncdn.com/i/headshots/nfl/players/full/${espnId}.png`;
+  return `https://a.espncdn.com/i/headshots/college-football/players/full/${espnId}.png`;
+}
+async function proxyImage(res, url){
+  if(!url) return false;
+  try{
+    const r=await fetch(url);
+    if(!r.ok) return false;
+    const ctype=r.headers.get('content-type')||'image/png';
+    const buf=Buffer.from(await r.arrayBuffer());
+    res.setHeader('content-type', ctype);
+    res.setHeader('cache-control','public, max-age=86400');
+    res.end(buf);
+    return true;
+  }catch{ return false; }
+}
+app.get('/api/images/team/:key', async (req,res)=>{
+  const league=(req.query.league||'nfl'); const abbr=(req.query.abbr||'').toLowerCase();
+  const ok = await proxyImage(res, espnTeamURL(abbr||req.params.key.toLowerCase(), league));
+  if(!ok) return res.redirect(FRONTEND_URL+PH_TEAM);
+});
+app.get('/api/images/player/:key', async (req,res)=>{
+  const league=(req.query.league||'nfl'); const espnId=(req.query.espnId||'');
+  const ok = await proxyImage(res, espnPlayerURL(espnId||req.params.key, league));
+  if(!ok) return res.redirect(FRONTEND_URL+PH_PLAYER);
+});
+
+app.get('/', (_,res)=>res.send('Pi² Sports backend is running'));
+app.listen(PORT, ()=>console.log('Pi2 backend listening on', PORT));
