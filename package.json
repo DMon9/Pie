@@ -1,14 +1,20 @@
 {
-  "name": "pi2sports-backend-fantasy",
-  "version": "1.5.0",
+  "name": "ubet-backend-admin",
+  "version": "1.0.0",
   "main": "server.js",
   "type": "commonjs",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "pg": "^8.11.5",
     "body-parser": "^1.20.2",
-    "cookie-parser": "^1.4.6"
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "ethers": "^5.7.2",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^2.7.0",
+    "pg": "^8.11.5",
+    "stripe": "^12.0.0"
   }
 }
